@@ -1,7 +1,6 @@
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
-// https://vite.dev/config/
 export default defineConfig({
   base: '/moosik/', // GitHub Pages serves the site at yashverma2367.github.io/moosik/
   plugins: [react()],

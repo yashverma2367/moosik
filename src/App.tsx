@@ -1,38 +1,47 @@
-import { useEffect, useRef, useState } from 'react'
-import { PRESETS } from './effects'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { PRESETS, type PresetName } from './effects'
 import LevelMeter from './LevelMeter'
-import { VIDEO_FILTERS } from './videoFilters'
+import type { Layout, MicLevel, Theme } from './stage'
 import StageCanvas from './StageCanvas'
 import { useMedia } from './useMedia'
 import { useRecorder } from './useRecorder'
+import { VIDEO_FILTERS, type VideoFilterName } from './videoFilters'
 
-const REEL_MAX_SEC = 90 // the progress bar fills up over this long
-const COUNTDOWN_SEC = 5 // time to get in position after pressing Record
+const REEL_MAX_SEC = 90
+const COUNTDOWN_SEC = 5
 
 const PANELS = { voice: 'Voice', look: 'Look' }
+type Panel = keyof typeof PANELS
 
-// One row of pick-one buttons; the picked one fills with its colour in the bright theme.
-function OptionGrid({ label, options, value, onChange, theme }) {
-  const count = Object.keys(options).length
+interface OptionGridProps<K extends string> {
+  label: string
+  options: Record<K, { label: string; color: string }>
+  value: NoInfer<K>
+  onChange(key: NoInfer<K>): void
+  theme: Theme
+}
+
+function OptionGrid<K extends string>({ label, options, value, onChange, theme }: OptionGridProps<K>) {
+  const keys = Object.keys(options) as K[]
   return (
-    <div className="presets" role="group" aria-label={label} style={{ '--cols': count > 6 ? 4 : 3 }}>
-      {Object.entries(options).map(([key, o]) => (
+    <div className="presets" role="group" aria-label={label} style={{ '--cols': keys.length > 6 ? 4 : 3 } as CSSProperties}>
+      {keys.map((key) => (
         <button
           key={key}
           type="button"
           className="preset"
           aria-pressed={value === key}
-          style={value === key && theme === 'candy' ? { background: o.color, color: '#fff' } : undefined}
+          style={value === key && theme === 'candy' ? { background: options[key].color, color: '#fff' } : undefined}
           onClick={() => onChange(key)}
         >
-          {o.label}
+          {options[key].label}
         </button>
       ))}
     </div>
   )
 }
 
-function loadTheme() {
+function loadTheme(): Theme {
   try {
     return localStorage.getItem('moosik-theme') === 'gloom' ? 'gloom' : 'candy'
   } catch {
@@ -40,7 +49,7 @@ function loadTheme() {
   }
 }
 
-function LayoutToggle({ layout, onChange }) {
+function LayoutToggle({ layout, onChange }: { layout: Layout; onChange(layout: Layout): void }) {
   const next = layout === 'vinyl' ? 'graph' : 'vinyl'
   return (
     <button type="button" className="theme-toggle" onClick={() => onChange(next)}>
@@ -59,7 +68,7 @@ function LayoutToggle({ layout, onChange }) {
   )
 }
 
-function ThemeToggle({ theme, onChange }) {
+function ThemeToggle({ theme, onChange }: { theme: Theme; onChange(theme: Theme): void }) {
   const next = theme === 'gloom' ? 'candy' : 'gloom'
   return (
     <button type="button" className="theme-toggle" onClick={() => onChange(next)}>
@@ -78,8 +87,8 @@ function ThemeToggle({ theme, onChange }) {
   )
 }
 
-// Lives in the HTML over the canvas, not on it, so it doesn't show up in the video.
-function RecOverlay({ start }) {
+// Rendered over the canvas, not on it, so it isn't in the video.
+function RecOverlay({ start }: { start: number }) {
   const [now, setNow] = useState(start)
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 100)
@@ -101,22 +110,21 @@ function RecOverlay({ start }) {
 }
 
 function App() {
-  const canvasRef = useRef(null)
-  const levelRef = useRef(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const levelRef = useRef<MicLevel | null>(null)
   const media = useMedia()
   const recorder = useRecorder()
-  const [preset, setPreset] = useState('studio')
+  const [preset, setPreset] = useState<PresetName>('studio')
   const [monitor, setMonitor] = useState(false)
-  const [theme, setTheme] = useState(loadTheme)
-  const [look, setLook] = useState('none')
-  // grain remembered per theme: on by default for gloom, off for bright
-  const [grainByTheme, setGrainByTheme] = useState({ candy: false, gloom: true })
+  const [theme, setTheme] = useState<Theme>(loadTheme)
+  const [look, setLook] = useState<VideoFilterName>('none')
+  const [grainByTheme, setGrainByTheme] = useState<Record<Theme, boolean>>({ candy: false, gloom: true })
   const grain = grainByTheme[theme]
-  const [panel, setPanel] = useState('voice')
-  const [layout, setLayout] = useState('graph')
-  const [vinylClears, setVinylClears] = useState(0) // bumped by the Clear button
-  const [countdown, setCountdown] = useState(null) // seconds left before recording starts
-  const countdownTimer = useRef(null)
+  const [panel, setPanel] = useState<Panel>('voice')
+  const [layout, setLayout] = useState<Layout>('graph')
+  const [vinylClears, setVinylClears] = useState(0)
+  const [countdown, setCountdown] = useState<number | null>(null)
+  const countdownTimer = useRef<number | undefined>(undefined)
 
   useEffect(() => () => clearInterval(countdownTimer.current), [])
 
@@ -125,16 +133,16 @@ function App() {
     try {
       localStorage.setItem('moosik-theme', theme)
     } catch {
-      // private mode: theme just isn't remembered
+      // private mode: the theme just isn't remembered
     }
   }, [theme])
 
-  function changePreset(name) {
+  function changePreset(name: PresetName) {
     setPreset(name)
     media.setPreset(name)
   }
 
-  function toggleMonitor(on) {
+  function toggleMonitor(on: boolean) {
     setMonitor(on)
     media.setMonitor(on)
   }
@@ -145,14 +153,13 @@ function App() {
       return
     }
     if (countdown != null) {
-      // pressed again during the countdown: cancel
       clearInterval(countdownTimer.current)
       setCountdown(null)
       return
     }
     let left = COUNTDOWN_SEC
     setCountdown(left)
-    countdownTimer.current = setInterval(() => {
+    countdownTimer.current = window.setInterval(() => {
       left -= 1
       if (left > 0) {
         setCountdown(left)
@@ -160,7 +167,7 @@ function App() {
       }
       clearInterval(countdownTimer.current)
       setCountdown(null)
-      recorder.start(canvasRef.current, media.nodes.recordStream)
+      if (canvasRef.current && media.nodes) recorder.start(canvasRef.current, media.nodes.recordStream)
     }, 1000)
   }
 
@@ -170,7 +177,7 @@ function App() {
         <h1>moosik</h1>
         <div className="rainbow" />
         <p>Sing into your camera. Your voice becomes a ribbon of colour, ready to post as a Reel.</p>
-        <button className="start" type="button" onClick={() => media.start(preset)}>
+        <button className="start" type="button" onClick={() => void media.start(preset)}>
           Start camera &amp; mic
         </button>
         {media.error && <p className="error">{media.error}</p>}
@@ -183,8 +190,19 @@ function App() {
   return (
     <main className="app">
       <div className="frame">
-        <StageCanvas canvasRef={canvasRef} levelRef={levelRef} video={video} analyser={analyser} sampleRate={sampleRate} theme={theme} look={look} grain={grain} layout={layout} vinylClears={vinylClears} />
-        {recorder.recording && <RecOverlay start={recorder.startedAt} />}
+        <StageCanvas
+          canvasRef={canvasRef}
+          levelRef={levelRef}
+          video={video}
+          analyser={analyser}
+          sampleRate={sampleRate}
+          theme={theme}
+          look={look}
+          grain={grain}
+          layout={layout}
+          vinylClears={vinylClears}
+        />
+        {recorder.startedAt != null && <RecOverlay start={recorder.startedAt} />}
         {countdown != null && (
           <div className="countdown" aria-live="assertive">
             <span key={countdown}>{countdown}</span>
@@ -195,16 +213,9 @@ function App() {
       <div className="controls">
         <LevelMeter levelRef={levelRef} />
         <div className="tabs" role="tablist" aria-label="Filters">
-          {Object.entries(PANELS).map(([key, label]) => (
-            <button
-              key={key}
-              type="button"
-              role="tab"
-              className="tab"
-              aria-selected={panel === key}
-              onClick={() => setPanel(key)}
-            >
-              {label}
+          {(Object.keys(PANELS) as Panel[]).map((key) => (
+            <button key={key} type="button" role="tab" className="tab" aria-selected={panel === key} onClick={() => setPanel(key)}>
+              {PANELS[key]}
             </button>
           ))}
         </div>

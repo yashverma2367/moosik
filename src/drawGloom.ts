@@ -1,41 +1,69 @@
-import { drawSelfie, H, W } from './draw'
-import { createVinylView, drawVinyl } from './drawVinyl'
+import { createVinylView, drawVinyl, type VinylPaint, type VinylView } from './drawVinyl'
+import type { Motion } from './motion'
 import { isBlackKey, midiToHz, midiToName, noteLetter } from './notes'
+import type { PitchPoint, PitchTracker } from './pitch'
+import { drawSelfie, H, S, W, type StageFrame } from './stage'
+import type { VideoFilterName } from './videoFilters'
 
-// Dark "gloom" theme for sad songs: vignette, fog, rain, a smoke ribbon shedding ash.
-// (Film grain is a separate toggle, drawn by StageCanvas over either theme.)
-const S = W / 358 // the design was drawn on a 358 px wide frame; S scales its sizes up
+type Ctx = CanvasRenderingContext2D
 
-const tint = (alpha) => `rgba(201,196,186,${Math.min(1, alpha)})` // #C9C4BA, warm ash grey
+const tint = (alpha: number) => `rgba(201,196,186,${Math.min(1, alpha)})`
 
 const TRAY = { x: 8 * S, y: H - 8 * S - 234 * S, w: W - 16 * S, h: 234 * S }
 const VIZ_H = 232 * S
 const VIZ_TOP = H - VIZ_H
 const PAD = 30 * S
-const SPAN = 11 // semitones visible at once
+const SPAN = 11
 const LANE_H = (VIZ_H - 2 * PAD) / SPAN
-const NOW_X = 250 * S // where the newest pitch is drawn
-const PX_PER_SEC = 55 * S // slower than the bright theme
-const FADE_W = 170 * S // oldest part of the smoke fades out over this width
+const NOW_X = 250 * S
+const PX_PER_SEC = 55 * S
+const FADE_W = 170 * S
 const VINYL = { cx: W / 2, cy: TRAY.y + TRAY.h / 2, r: TRAY.h / 2 - 10 * S }
 
 const ASH_SEC = 3.5
-const ASH_EVERY = 0.11 // seconds between flakes while singing
+const ASH_EVERY = 0.11
 const BREATHE_SEC = 5
 const RAIN_DROPS = 22
 const RING_SEC = 1.2
 
-const yOf = (view, midi) => VIZ_TOP + PAD + (view.center + SPAN / 2 - midi) * LANE_H
+interface Ash {
+  y: number
+  age: number
+  rnd: number
+  volume: number
+  ox: number
+  oy: number
+  vx: number
+  vy: number
+}
 
-// Animation state that lives across frames.
-export function createView() {
+interface SmokeRing {
+  x: number
+  y: number
+  age: number
+  strength: number
+}
+
+export interface GloomView {
+  center: number
+  ash: Ash[]
+  ashClock: number
+  rings: SmokeRing[]
+  ringClock: number
+  layer: HTMLCanvasElement
+  vinyl: VinylView
+}
+
+const yOf = (view: GloomView, midi: number) => VIZ_TOP + PAD + (view.center + SPAN / 2 - midi) * LANE_H
+
+export function createView(): GloomView {
   const layer = document.createElement('canvas')
   layer.width = W
   layer.height = VIZ_H
   return { center: 50, ash: [], ashClock: 0, rings: [], ringClock: 0, layer, vinyl: createVinylView(VINYL.r * 2) }
 }
 
-export function drawStage(ctx, { video, look, layout, tracker, motion, view, now, dt }) {
+export function drawStage(ctx: Ctx, { video, look, layout, tracker, motion, view, now, dt }: StageFrame<GloomView>) {
   drawCamera(ctx, video, look, motion)
   drawTray(ctx)
   drawWeather(ctx, now)
@@ -47,11 +75,12 @@ export function drawStage(ctx, { video, look, layout, tracker, motion, view, now
   drawLanes(ctx, tracker, view, motion)
   drawSmoke(ctx, tracker, view, now, motion)
   drawRings(ctx, view.rings)
-  drawOrb(ctx, NOW_X, yOf(view, tracker.history.at(-1)?.midi ?? view.center), tracker, motion)
+  const latest = tracker.history.at(-1)
+  drawOrb(ctx, NOW_X, yOf(view, latest?.midi ?? view.center), latest?.voiced ? latest.midi : null, tracker.volume, motion)
   drawNote(ctx, tracker.current, now)
 }
 
-function spawnAsh(view, y, volume, puff) {
+function spawnAsh(view: GloomView, y: number, volume: number, puff: boolean) {
   const angle = Math.random() * Math.PI * 2
   const speed = puff ? (30 + Math.random() * 60) * S : 0
   view.ash.push({
@@ -59,27 +88,26 @@ function spawnAsh(view, y, volume, puff) {
     age: 0,
     rnd: Math.random(),
     volume,
-    ox: 0, // puff offset, drifting out and slowing down
+    ox: 0,
     oy: 0,
     vx: Math.cos(angle) * speed,
     vy: Math.sin(angle) * speed,
   })
 }
 
-function updateView(view, tracker, motion, dt) {
+function updateView(view: GloomView, tracker: PitchTracker, motion: Motion, dt: number) {
   const midi = tracker.current
   if (midi != null) {
-    view.center += (midi - view.center) * 0.04 // follow her range
+    view.center += (midi - view.center) * 0.04
     const y = yOf(view, midi)
 
-    view.ashClock += dt * (1 + motion.hold * 2) // more ash the longer she holds
+    view.ashClock += dt * (1 + motion.hold * 2)
     while (view.ashClock > ASH_EVERY) {
       view.ashClock -= ASH_EVERY
       spawnAsh(view, y, tracker.volume, false)
     }
     if (motion.onset) for (let i = 0; i < 4 + motion.onset * 8; i++) spawnAsh(view, y, tracker.volume, true)
 
-    // vibrato: one smoke ring per wobble
     if (motion.vibrato > 0.15) {
       view.ringClock += dt * motion.vibratoRate
       if (view.ringClock >= 1) {
@@ -100,13 +128,12 @@ function updateView(view, tracker, motion, dt) {
   view.rings = view.rings.filter((r) => r.age < RING_SEC)
 }
 
-// Camera in its natural colours (plus the picked look and camera motion), vignetted.
-function drawCamera(ctx, video, look, motion) {
+function drawCamera(ctx: Ctx, video: HTMLVideoElement, look: VideoFilterName, motion: Motion) {
   ctx.fillStyle = '#16181C'
   ctx.fillRect(0, 0, W, H)
   drawSelfie(ctx, video, look, motion)
 
-  // elliptical vignette: radial gradient squashed vertically
+  // elliptical vignette: a radial gradient squashed vertically
   const cx = W / 2
   const cy = H * 0.35
   const rx = W * 1.2
@@ -122,8 +149,7 @@ function drawCamera(ctx, video, look, motion) {
   ctx.restore()
 }
 
-// Solid dark tray the graph sits on.
-function drawTray(ctx) {
+function drawTray(ctx: Ctx) {
   ctx.fillStyle = '#121417'
   ctx.strokeStyle = 'rgba(255,255,255,0.08)'
   ctx.lineWidth = S
@@ -133,8 +159,7 @@ function drawTray(ctx) {
   ctx.stroke()
 }
 
-// Fog banks drifting left and rain streaks, inside the tray.
-function drawWeather(ctx, now) {
+function drawWeather(ctx: Ctx, now: number) {
   ctx.save()
   ctx.beginPath()
   ctx.roundRect(TRAY.x, TRAY.y, TRAY.w, TRAY.h, 20 * S)
@@ -162,7 +187,7 @@ function drawWeather(ctx, now) {
   ctx.lineWidth = 0.7 * S
   for (let i = 0; i < RAIN_DROPS; i++) {
     const s = Math.sin(i * 12.9898) * 43758.5
-    const r = s - Math.floor(s) // fixed per drop
+    const r = s - Math.floor(s)
     const len = 10 + r * 16
     const y = ((now * (140 + r * 90) + r * 400) % (232 + 60)) - 30
     const x = (i * 16.7 + r * 30) % 358
@@ -175,13 +200,12 @@ function drawWeather(ctx, now) {
   ctx.restore()
 }
 
-// Hairline note lanes; the one she's on brightens on each syllable.
-function drawLanes(ctx, tracker, view, motion) {
+function drawLanes(ctx: Ctx, tracker: PitchTracker, view: GloomView, motion: Motion) {
   const midi = tracker.current
   const top = view.center + SPAN / 2
   ctx.save()
   ctx.beginPath()
-  ctx.roundRect(TRAY.x, TRAY.y, TRAY.w, TRAY.h, 20 * S) // keep lanes and labels inside the tray
+  ctx.roundRect(TRAY.x, TRAY.y, TRAY.w, TRAY.h, 20 * S)
   ctx.clip()
   ctx.font = `italic 500 ${15 * S}px 'Cormorant Garamond', Georgia, serif`
   ctx.textAlign = 'left'
@@ -193,7 +217,7 @@ function drawLanes(ctx, tracker, view, motion) {
     ctx.strokeStyle = `rgba(255,255,255,${0.035 + near * 0.07 + near * motion.pulse * 0.12})`
     ctx.beginPath()
     ctx.moveTo(40 * S, y)
-    ctx.lineTo(W - 16 * S, y) // ends inside the tray
+    ctx.lineTo(W - 16 * S, y)
     ctx.stroke()
     ctx.fillStyle = `rgba(214,209,199,${0.5 + near * 0.45})`
     ctx.fillText(midiToName(n).toLowerCase(), 14 * S, y + 5 * S)
@@ -201,9 +225,9 @@ function drawLanes(ctx, tracker, view, motion) {
   ctx.restore()
 }
 
-// Fills `path` blurred. Draws the shape far off-canvas and lets its shadow land back in place,
-// which works in every browser (ctx.filter doesn't in Safari).
-function blurFill(c, path, color, blur) {
+// Blur without ctx.filter (unsupported in Safari): draw the shape off-canvas and let its
+// shadow land back in place.
+function blurFill(c: Ctx, path: Path2D, color: string, blur: number) {
   const off = W * 3
   c.save()
   c.shadowColor = color
@@ -215,21 +239,18 @@ function blurFill(c, path, color, blur) {
   c.restore()
 }
 
-// Smoke ribbon that widens and frays as it ages, an ink core, and ash sinking off the line.
-// The newest smoke swells on each syllable and thickens while a note is held.
-function drawSmoke(ctx, tracker, view, now, motion) {
-  const lc = view.layer.getContext('2d')
+function drawSmoke(ctx: Ctx, tracker: PitchTracker, view: GloomView, now: number, motion: Motion) {
+  const lc = view.layer.getContext('2d')!
   const history = tracker.history
-  const x = (t) => NOW_X - (now - t) * PX_PER_SEC
-  const y = (p) => yOf(view, p.midi ?? view.center) - VIZ_TOP
+  const x = (t: number) => NOW_X - (now - t) * PX_PER_SEC
+  const y = (p: PitchPoint) => yOf(view, p.midi ?? view.center) - VIZ_TOP
   lc.clearRect(0, 0, W, VIZ_H)
   lc.lineCap = 'round'
   lc.lineJoin = 'round'
 
-  // split into runs of continuous singing; each run starts from the point before it,
-  // so the jump from the resting line up (or down) to the new note is drawn too
-  const runs = []
-  let run = []
+  // each run of singing starts from the point before it, so the jump into a new note is drawn
+  const runs: PitchPoint[][] = []
+  let run: PitchPoint[] = []
   for (let i = 0; i < history.length; i++) {
     const p = history[i]
     if (p.voiced) {
@@ -267,7 +288,6 @@ function drawSmoke(ctx, tracker, view, now, motion) {
     lc.stroke()
   }
 
-  // line while silent: a little dimmer than the ink core, but never gone
   lc.strokeStyle = tint(0.55)
   lc.lineWidth = 1.1 * S
   lc.beginPath()
@@ -299,8 +319,7 @@ function drawSmoke(ctx, tracker, view, now, motion) {
   ctx.drawImage(view.layer, 0, VIZ_TOP)
 }
 
-// Faint smoke rings drifting out from the orb on each vibrato wobble.
-function drawRings(ctx, rings) {
+function drawRings(ctx: Ctx, rings: SmokeRing[]) {
   ctx.lineWidth = 1.2 * S
   for (const r of rings) {
     const k = r.age / RING_SEC
@@ -311,18 +330,16 @@ function drawRings(ctx, rings) {
   }
 }
 
-// Tiny pale point in a soft glow that grows with loudness and while a note is held.
-// Also the needle in vinyl mode.
-function drawOrb(ctx, x, y, tracker, motion) {
-  const latest = tracker.history.at(-1)
-  if (!latest?.voiced) {
+// midi = null draws the faint resting dot.
+function drawOrb(ctx: Ctx, x: number, y: number, midi: number | null, volume: number, motion: Motion) {
+  if (midi == null) {
     ctx.fillStyle = 'rgba(238,234,226,0.35)'
     ctx.beginPath()
     ctx.arc(x, y, 2 * S, 0, Math.PI * 2)
     ctx.fill()
     return
   }
-  const radius = (10 + tracker.volume * 16) * S * 1.8 * (1 + motion.hold * 0.8 + motion.pulse * 0.3)
+  const radius = (10 + volume * 16) * S * 1.8 * (1 + motion.hold * 0.8 + motion.pulse * 0.3)
   const glow = ctx.createRadialGradient(x, y, 0, x, y, radius)
   glow.addColorStop(0, tint(0.22 + motion.hold * 0.18))
   glow.addColorStop(1, tint(0))
@@ -334,9 +351,7 @@ function drawOrb(ctx, x, y, tracker, motion) {
   ctx.fill()
 }
 
-// Lowercase serif note, barely there, slowly breathing.
-function drawNote(ctx, midi, now) {
-  const voiced = midi != null
+function drawNote(ctx: Ctx, midi: number | null, now: number) {
   const right = W - 20 * S
   const bottom = H - 240 * S
   const breathe = (1 - Math.cos(((now % BREATHE_SEC) / BREATHE_SEC) * Math.PI * 2)) / 2
@@ -349,12 +364,12 @@ function drawNote(ctx, midi, now) {
   ctx.font = `500 ${13 * S}px 'Inter Tight', system-ui, sans-serif`
   ctx.letterSpacing = `${2.6 * S}px`
   ctx.fillStyle = '#A7A39B'
-  ctx.fillText(`${voiced ? Math.round(midiToHz(midi)) : '—'} HZ`, right + 2.6 * S, bottom - 2 * S)
+  ctx.fillText(`${midi != null ? Math.round(midiToHz(midi)) : '—'} HZ`, right + 2.6 * S, bottom - 2 * S)
   ctx.letterSpacing = '0px'
 
   const baseline = bottom - 26 * S
   let x = right
-  if (voiced) {
+  if (midi != null) {
     ctx.font = `italic 400 ${22 * S}px 'Cormorant Garamond', Georgia, serif`
     ctx.fillStyle = '#A7A39B'
     const octave = String(Math.floor(Math.round(midi) / 12) - 1)
@@ -363,17 +378,16 @@ function drawNote(ctx, midi, now) {
   }
   ctx.font = `400 ${52 * S}px 'Cormorant Garamond', Georgia, serif`
   ctx.fillStyle = '#D6D1C7'
-  ctx.fillText(voiced ? noteLetter(midi).toLowerCase() : '·', x, baseline)
+  ctx.fillText(midi != null ? noteLetter(midi).toLowerCase() : '·', x, baseline)
   ctx.restore()
 }
 
-// How vinyl mode looks in this theme: near-black record, ash-grey smoky grooves, serif label.
-const VINYL_PAINT = {
+const VINYL_PAINT: VinylPaint = {
   disc: '#0A0B0D',
   texture: 'rgba(255,255,255,0.03)',
   sheen: 'rgba(255,255,255,0.07)',
-  groove(rc, midi, width) {
-    rc.strokeStyle = tint(0.06) // smoke around the groove
+  groove(rc, _midi, width) {
+    rc.strokeStyle = tint(0.06)
     rc.lineWidth = width * 3
     rc.stroke()
     rc.strokeStyle = tint(0.75)
@@ -386,7 +400,6 @@ const VINYL_PAINT = {
     rc.stroke()
   },
   label(ctx, midi, cx, cy, r) {
-    const voiced = midi != null
     ctx.fillStyle = '#121417'
     ctx.strokeStyle = 'rgba(255,255,255,0.08)'
     ctx.lineWidth = S
@@ -398,8 +411,8 @@ const VINYL_PAINT = {
     ctx.textBaseline = 'middle'
     ctx.fillStyle = '#D6D1C7'
     ctx.font = `400 ${r * 0.95}px 'Cormorant Garamond', Georgia, serif`
-    ctx.fillText(voiced ? noteLetter(midi).toLowerCase() : '·', cx, cy - r * 0.12)
-    if (voiced) {
+    ctx.fillText(midi != null ? noteLetter(midi).toLowerCase() : '·', cx, cy - r * 0.12)
+    if (midi != null) {
       ctx.fillStyle = '#A7A39B'
       ctx.font = `italic 400 ${r * 0.38}px 'Cormorant Garamond', Georgia, serif`
       ctx.fillText(String(Math.floor(Math.round(midi) / 12) - 1), cx, cy + r * 0.55)
@@ -421,12 +434,12 @@ const VINYL_PAINT = {
     for (const s of sparks) {
       ctx.fillStyle = tint((1 - s.age / sparkSec) * 0.7)
       ctx.beginPath()
-      ctx.arc(s.x, s.y + s.age * 10 * S, (0.5 + s.size * 1.1) * S, 0, Math.PI * 2) // ash sinks
+      ctx.arc(s.x, s.y + s.age * 10 * S, (0.5 + s.size * 1.1) * S, 0, Math.PI * 2)
       ctx.fill()
     }
     drawRings(ctx, rings)
   },
   needle(ctx, x, y, midi, volume, motion) {
-    drawOrb(ctx, x, y, { history: [{ midi, voiced: midi != null }], volume }, motion)
+    drawOrb(ctx, x, y, midi, volume, motion)
   },
 }
